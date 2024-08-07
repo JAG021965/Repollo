@@ -1,0 +1,106 @@
+<?php
+// Configuración de la conexión a la base de datos
+$servername = "localhost";
+$username = "usuarioficticio";
+$password = "contrasenaficticia";
+$dbname = "ficticiaDB";
+
+// Crear conexión
+$conn = new mysqli($servername, $username, $password, $dbname);
+
+// Verificar conexión
+if ($conn->connect_error) {
+    die("Conexión fallida: " . $conn->connect_error);
+}
+
+// Función para obtener el saldo actual de la base de datos
+function getCurrentBalance($conn, $accountId) {
+    $sql = "SELECT balance FROM accounts WHERE account_id = ?";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("i", $accountId);
+    $stmt->execute();
+    $stmt->bind_result($balance);
+    $stmt->fetch();
+    $stmt->close();
+    return $balance;
+}
+
+// Función para actualizar el saldo en la base de datos
+function updateBalance($conn, $accountId, $newBalance) {
+    $sql = "UPDATE accounts SET balance = ? WHERE account_id = ?";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("di", $newBalance, $accountId);
+    $result = $stmt->execute();
+    $stmt->close();
+    return $result;
+}
+
+// Función para registrar la transacción en un log
+function recordTransaction($accountId, $withdrawAmount) {
+    $logMessage = "Account ID: $accountId, Withdraw Amount: $withdrawAmount, Date: " . date('Y-m-d H:i:s') . "\n";
+    file_put_contents('transaction_log.txt', $logMessage, FILE_APPEND);
+}
+
+// Función principal para manejar el retiro usando semáforos
+function withdrawMoney($conn, $accountId, $withdrawAmount) {
+    // Crear un semáforo
+    $sem_key = ftok(__FILE__, 'a');
+    $sem_id = sem_get($sem_key, 1);
+
+    if ($sem_id === false) {
+        die("No se pudo crear el semáforo.");
+    }
+
+    // Adquirir el semáforo
+    if (!sem_acquire($sem_id)) {
+        die("No se pudo adquirir el semáforo.");
+    }
+
+    // Iniciar una transacción
+    $conn->begin_transaction();
+
+    try {
+        // Obtener el saldo actual
+        $currentBalance = getCurrentBalance($conn, $accountId);
+
+        if ($withdrawAmount > $currentBalance) {
+            // Si la cantidad de retiro excede el saldo, hacer rollback y devolver error
+            $conn->rollback();
+            sem_release($sem_id);
+            return "Withdrawal amount exceeds current balance.";
+        }
+
+        // Calcular el nuevo saldo
+        $newBalance = $currentBalance - $withdrawAmount;
+
+        // Actualizar el saldo en la base de datos
+        if (updateBalance($conn, $accountId, $newBalance)) {
+            // Registrar la transacción en el log
+            recordTransaction($accountId, $withdrawAmount);
+
+            // Confirmar la transacción
+            $conn->commit();
+            sem_release($sem_id);
+            return "Withdrawal successful. New balance is $newBalance.";
+        } else {
+            // Si falla la actualización, hacer rollback y devolver error
+            $conn->rollback();
+            sem_release($sem_id);
+            return "Error updating balance.";
+        }
+    } catch (Exception $e) {
+        // Si ocurre una excepción, hacer rollback y devolver error
+        $conn->rollback();
+        sem_release($sem_id);
+        return "Transaction failed: " . $e->getMessage();
+    }
+}
+
+// Ejemplo de uso
+$accountId = 12345;
+$withdrawAmount = 200;
+echo withdrawMoney($conn, $accountId, $withdrawAmount);
+
+// Cerrar la conexión
+$conn->close();
+?>
